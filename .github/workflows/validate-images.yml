@@ -1,0 +1,53 @@
+name: Validate Images
+
+on:
+  pull_request:
+    paths:
+      - "**/*.png"
+
+jobs:
+  validate:
+    name: Validate PNG images
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get changed PNG files
+        id: changed-files
+        run: |
+          git fetch origin "${{ github.base_ref }}"
+          # List added or modified PNG files only (exclude deletions/renames)
+          FILES=$(git diff --name-only --diff-filter=AM \
+            "origin/${{ github.base_ref }}...HEAD" \
+            | grep '\.png$' || true)
+          echo "Found PNG files:"
+          echo "$FILES"
+          # Store as space-separated list for the next step
+          FILES_SPACE=$(echo "$FILES" | tr '\n' ' ' | xargs)
+          echo "files=$FILES_SPACE" >> "$GITHUB_OUTPUT"
+          if [ -n "$FILES_SPACE" ]; then
+            echo "any_changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "any_changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Python
+        if: steps.changed-files.outputs.any_changed == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install Pillow
+        if: steps.changed-files.outputs.any_changed == 'true'
+        run: pip install Pillow
+
+      - name: Validate images
+        if: steps.changed-files.outputs.any_changed == 'true'
+        run: |
+          python3 scripts/validate_images.py ${{ steps.changed-files.outputs.files }}
