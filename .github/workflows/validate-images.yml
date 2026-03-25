@@ -4,10 +4,11 @@ on:
   pull_request:
     paths:
       - "**/*.png"
+      - "**/*.svg"
 
 jobs:
   validate:
-    name: Validate PNG images
+    name: Validate PNG and SVG images
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -18,15 +19,15 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Get changed PNG files
+      - name: Get changed image files
         id: changed-files
         run: |
           git fetch origin "${{ github.base_ref }}"
-          # List added or modified PNG files only (exclude deletions/renames)
+          # List added or modified PNG/SVG files only (exclude deletions/renames)
           FILES=$(git diff --name-only --diff-filter=AM \
             "origin/${{ github.base_ref }}...HEAD" \
-            | grep '\.png$' || true)
-          echo "Found PNG files:"
+            | grep -E '\.(png|svg)$' || true)
+          echo "Found image files:"
           echo "$FILES"
           # Store as space-separated list for the next step
           FILES_SPACE=$(echo "$FILES" | tr '\n' ' ' | xargs)
@@ -50,4 +51,4 @@ jobs:
       - name: Validate images
         if: steps.changed-files.outputs.any_changed == 'true'
         run: |
-          python3 scripts/validate_images.py ${{ steps.changed-files.outputs.files }}
+          python3 .scripts/validate_images.py ${{ steps.changed-files.outputs.files }}
