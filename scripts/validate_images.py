@@ -9,7 +9,11 @@ Each image must be:
 
   Example: Microsoft.Teams -> m/microsoft/teams.png
            Mozilla.Firefox.az -> m/mozilla/firefox/az.png
+
+When run inside GitHub Actions (GITHUB_ACTIONS=true) each failure also emits a
+workflow annotation so the faulty file is highlighted inline in the PR diff.
 """
+import os
 import re
 import sys
 from pathlib import Path
@@ -22,6 +26,17 @@ except ImportError:
 
 REQUIRED_SIZE = (1024, 1024)
 VALID_COMPONENT = re.compile(r"^[a-z0-9][a-z0-9\-]*$")
+IN_GITHUB_ACTIONS = os.environ.get("GITHUB_ACTIONS") == "true"
+
+
+def annotate_error(path: str, message: str) -> None:
+    """Emit a GitHub Actions error annotation for *path* when running in CI."""
+    if IN_GITHUB_ACTIONS:
+        # Percent signs, carriage returns, and newlines must be URL-encoded
+        # inside the message to avoid being mis-parsed as workflow command
+        # parameters.
+        safe_msg = message.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+        print(f"::error file={path}::{safe_msg}", flush=True)
 
 
 def validate_path(path: str) -> tuple[bool, str]:
@@ -85,25 +100,31 @@ def validate_image(path: str) -> bool:
     path_ok, path_msg = validate_path(path)
     if not path_ok:
         print(f"  PATH ERROR: {path_msg}")
+        annotate_error(path, f"Path error: {path_msg}")
         ok = False
 
     try:
         with Image.open(path) as img:
             if img.format != "PNG":
-                print(f"  FORMAT ERROR: expected PNG, got {img.format}")
+                msg = f"expected PNG format, got {img.format}"
+                print(f"  FORMAT ERROR: {msg}")
+                annotate_error(path, f"Format error: {msg}")
                 ok = False
 
             if img.size != REQUIRED_SIZE:
-                print(
-                    f"  SIZE ERROR: expected 1024x1024, "
-                    f"got {img.size[0]}x{img.size[1]}"
-                )
+                msg = f"expected 1024x1024, got {img.size[0]}x{img.size[1]}"
+                print(f"  SIZE ERROR: {msg}")
+                annotate_error(path, f"Size error: {msg}")
                 ok = False
     except FileNotFoundError:
-        print(f"  FILE ERROR: file not found")
+        msg = "file not found"
+        print(f"  FILE ERROR: {msg}")
+        annotate_error(path, f"File error: {msg}")
         ok = False
     except Exception as e:
-        print(f"  READ ERROR: could not open image: {e}")
+        msg = f"could not open image: {e}"
+        print(f"  READ ERROR: {msg}")
+        annotate_error(path, f"Read error: {msg}")
         ok = False
 
     if ok:
