@@ -1,0 +1,76 @@
+name: Fetch Icons
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "wishlist.txt"
+
+jobs:
+  fetch:
+    name: Fetch colored icons from wishlist
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # push the icon branch
+      pull-requests: write  # open the PR
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install dependencies
+        run: pip install cairosvg requests
+
+      - name: Configure git identity
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Create icon branch
+        id: branch
+        run: |
+          BRANCH="icons/auto-$(date -u +%Y%m%d-%H%M%S)"
+          git checkout -b "$BRANCH"
+          echo "name=$BRANCH" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch icons
+        id: fetch
+        run: |
+          python3 .scripts/fetch_icons.py
+          # Expose how many icons were added so we can skip the PR step when zero
+          COUNT=$(git diff --name-only origin/main...HEAD -- '*.png' | wc -l | xargs)
+          echo "icon_count=$COUNT" >> "$GITHUB_OUTPUT"
+
+      - name: Push branch
+        if: steps.fetch.outputs.icon_count != '0'
+        run: git push origin "${{ steps.branch.outputs.name }}"
+
+      - name: Open pull request
+        if: steps.fetch.outputs.icon_count != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr create \
+            --base main \
+            --head "${{ steps.branch.outputs.name }}" \
+            --title "Add ${{ steps.fetch.outputs.icon_count }} auto-fetched icon(s)" \
+            --body "Automatically fetched colored icons for packages in \`wishlist.txt\`.
+
+          Sources used (in priority order):
+          1. **Devicons** – colored brand SVGs for developer tools
+          2. **Papirus** – colored desktop-app icons
+          3. **Ionicons** – colored brand logo SVGs
+
+          Entries that could not be matched were moved to the bottom of \`wishlist.txt\` for retry on the next run.
+
+          Please review the icons before merging."

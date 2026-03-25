@@ -6,9 +6,11 @@ Sources tried in order (all are colored SVGs hosted on raw.githubusercontent.com
   2. Papirus   – desktop-app icons (Papirus icon theme, colored)
   3. Ionicons  – brand logo icons (logo-* variants, colored)
 
-The script pops the first entry from wishlist.txt, tries every source, saves
-the SVG + a 1024×1024 PNG, then moves on.  It stops after finding STOP_AFTER
-icons or when wishlist.txt is empty.
+Every entry in wishlist.txt is attempted each run.  Entries whose icon is
+successfully saved are removed from the list.  Entries for which no icon could
+be found are moved to the bottom so they are retried on the next run (new
+sources may appear over time).  A single git commit is made at the end when at
+least one icon was downloaded.
 """
 
 import json
@@ -22,7 +24,6 @@ import requests
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WISHLIST = REPO_ROOT / "wishlist.txt"
-STOP_AFTER = 10  # stop and commit after this many icons found
 
 # ── URL templates ─────────────────────────────────────────────────────────────
 DEVICONS_URL = (
@@ -209,18 +210,16 @@ def main() -> None:
         print("wishlist.txt is empty – nothing to do.")
         return
 
-    print(f"Loading devicons catalog…")
+    print("Loading devicons catalog…")
     devicons = load_devicons_catalog()
     print(f"  {len(devicons)} colored devicons available.")
-    print(f"Wishlist: {len(packages)} packages. Will stop after {STOP_AFTER} icons found.\n")
+    print(f"Wishlist: {len(packages)} packages.\n")
 
-    found: list[str] = []  # package IDs successfully saved this run
+    found: list[str] = []   # package IDs successfully saved this run
+    deferred: list[str] = []  # package IDs with no icon found → move to bottom
     failed = 0
 
-    while packages and len(found) < STOP_AFTER:
-        pid = packages.pop(0)
-        write_wishlist(packages)  # persist immediately (crash-safe)
-
+    for pid in packages:
         png_path = REPO_ROOT / package_path(pid, ".png")
         svg_path = REPO_ROOT / package_path(pid, ".svg")
 
@@ -228,12 +227,12 @@ def main() -> None:
             print(f"SKIP (exists): {pid}")
             continue
 
-        print(f"[{len(found)}/{STOP_AFTER}] {pid}")
+        print(f"  {pid}")
         result = find_colored_svg(pid, devicons)
 
         if not result:
-            print("    ✗ no colored icon found")
-            failed += 1
+            print("    ✗ no colored icon found – deferring to next run")
+            deferred.append(pid)
             continue
 
         source, svg_bytes = result
@@ -242,9 +241,15 @@ def main() -> None:
             print(f"    ✓ {source}  →  {package_path(pid, '.svg')}")
             found.append(pid)
         else:
+            deferred.append(pid)
             failed += 1
 
-    remaining = len(read_wishlist())
+    # Rebuild wishlist: successfully-fetched entries are removed;
+    # failed entries go to the bottom so they are retried next run.
+    remaining = [p for p in packages if p not in found]
+    # Re-order so deferred are at the end (preserve relative order of the rest)
+    not_deferred = [p for p in remaining if p not in deferred]
+    write_wishlist(not_deferred + deferred)
 
     if found:
         ids = ", ".join(found)
@@ -252,11 +257,13 @@ def main() -> None:
         print(f"\nCommitting {len(found)} icon(s)…")
         git_commit(commit_msg)
     else:
-        print("\nNo new icons found – nothing to commit.")
+        # Still commit the updated wishlist order if anything changed
+        git_commit("Update wishlist order after icon fetch attempt")
 
     print(
-        f"\nDone. Found: {len(found)}, Failed/no-match: {failed}, "
-        f"Remaining in wishlist: {remaining}"
+        f"\nDone. Found: {len(found)}, Deferred to next run: {len(deferred)}, "
+        f"PNG-conversion failures: {failed}, "
+        f"Remaining in wishlist: {len(read_wishlist())}"
     )
 
 
