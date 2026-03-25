@@ -30,10 +30,10 @@ The image path is derived from the Package ID as follows:
 
 | Package ID | Image Path | Image URL |
 |---|---|---|
-| `Microsoft.Teams` | `m/microsoft/teams.png` | `https://svrooij.github.io/winget-pkgs-icons/m/microsoft/teams.png` |
-| `Mozilla.Firefox` | `m/mozilla/firefox.png` | `https://svrooij.github.io/winget-pkgs-icons/m/mozilla/firefox.png` |
-| `Mozilla.Firefox.az` | `m/mozilla/firefox/az.png` | `https://svrooij.github.io/winget-pkgs-icons/m/mozilla/firefox/az.png` |
-| `Google.Chrome` | `g/google/chrome.png` | `https://svrooij.github.io/winget-pkgs-icons/g/google/chrome.png` |
+| `Microsoft.Teams` | `m/microsoft/teams.png` | `https://winget.svrooij.io/m/microsoft/teams.png` |
+| `Mozilla.Firefox` | `m/mozilla/firefox.png` | `https://winget.svrooij.io/m/mozilla/firefox.png` |
+| `Mozilla.Firefox.az` | `m/mozilla/firefox/az.png` | `https://winget.svrooij.io/m/mozilla/firefox/az.png` |
+| `Google.Chrome` | `g/google/chrome.png` | `https://winget.svrooij.io/g/google/chrome.png` |
 
 ## Contributing
 
