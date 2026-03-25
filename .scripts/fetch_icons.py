@@ -1,13 +1,20 @@
 #!/usr/bin/env python3
-"""Download icons for winget packages listed in wishlist.txt from SVGRepo.
+"""Download colored icons for winget packages listed in wishlist.txt.
 
-The script reads package IDs one at a time from wishlist.txt (root of the
-repo), removes each entry as it is processed, and stops after finding
-STOP_AFTER icons or when the file becomes empty.
+Sources tried in order (all are colored SVGs hosted on raw.githubusercontent.com):
+  1. Devicons  – developer-tool brand icons (colored "original" variant)
+  2. Papirus   – desktop-app icons (Papirus icon theme, colored)
+  3. Ionicons  – brand logo icons (logo-* variants, colored)
+
+The script pops the first entry from wishlist.txt, tries every source, saves
+the SVG + a 1024×1024 PNG, then moves on.  It stops after finding STOP_AFTER
+icons or when wishlist.txt is empty.
 """
 
+import json
 import re
-import time
+import subprocess
+import sys
 from pathlib import Path
 
 import cairosvg
@@ -15,124 +22,134 @@ import requests
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WISHLIST = REPO_ROOT / "wishlist.txt"
-SVGREPO_SEARCH = "https://www.svgrepo.com/vectors/{term}/multicolor/"
-STOP_AFTER = 10  # commit-friendly batch size
+STOP_AFTER = 10  # stop and commit after this many icons found
 
-# Matches CamelCase word boundaries, e.g. "AndroidStudio" → "Android Studio"
-CAMEL_RE = re.compile(r"(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
-
-# Direct SVG URL pattern embedded in SVGRepo search-result pages
-SVGREPO_SVG_URL_RE = re.compile(
-    r'https://www\.svgrepo\.com/show/(\d+)/([a-z0-9][a-z0-9\-]*)\.svg'
+# ── URL templates ─────────────────────────────────────────────────────────────
+DEVICONS_URL = (
+    "https://raw.githubusercontent.com/devicons/devicon/master/icons/{slug}/{slug}-original.svg"
+)
+PAPIRUS_URL = (
+    "https://raw.githubusercontent.com/PapirusDevelopmentTeam/"
+    "papirus-icon-theme/master/Papirus/48x48/apps/{slug}.svg"
+)
+IONICONS_URL = (
+    "https://raw.githubusercontent.com/ionic-team/ionicons/main/src/svg/logo-{slug}.svg"
+)
+DEVICONS_CATALOG_URL = (
+    "https://raw.githubusercontent.com/devicons/devicon/master/devicon.json"
 )
 
+# Matches CamelCase word boundaries: "AndroidStudio" → "Android Studio"
+CAMEL_RE = re.compile(r"(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
+
 SESSION = requests.Session()
-SESSION.headers.update({
-    "User-Agent": (
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-})
+SESSION.headers.update({"User-Agent": "winget-pkgs-icons/1.0 (icon fetcher)"})
 
 
-def fetch(url: str, timeout: int = 30) -> requests.Response | None:
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def fetch(url: str) -> bytes | None:
+    """Return response bytes for *url* on HTTP 200, else None."""
     try:
-        r = SESSION.get(url, timeout=timeout, allow_redirects=True)
-        if r.status_code == 200:
-            return r
-        return None
+        r = SESSION.get(url, timeout=15, allow_redirects=True)
+        return r.content if r.status_code == 200 else None
     except Exception:
         return None
 
 
-def package_path(package_id: str, suffix: str = ".png") -> Path:
-    """Return the repository-relative path for a package icon.
+def load_devicons_catalog() -> set[str]:
+    """Return the set of devicon names that have a colored 'original' SVG."""
+    data = fetch(DEVICONS_CATALOG_URL)
+    if not data:
+        print("  Warning: could not load devicons catalog; devicons source disabled.")
+        return set()
+    icons = json.loads(data)
+    return {i["name"] for i in icons if "original" in i.get("versions", {}).get("svg", [])}
 
-    Underscores in package ID segments (e.g. version suffixes like ``3_1``) are
-    replaced with hyphens so all path components pass the alphanumeric/hyphen
-    naming validator.
+
+def package_path(package_id: str, suffix: str = ".png") -> Path:
+    """Map a winget package ID to a repo-relative icon path.
 
     Examples::
-
-        Google.Chrome          → g/google/chrome.png
-        Microsoft.DotNet.SDK.9 → m/microsoft/dotnet/sdk/9.png
+        Google.Chrome            → g/google/chrome.png
+        Microsoft.DotNet.SDK.9   → m/microsoft/dotnet/sdk/9.png
         Microsoft.DotNet.SDK.3_1 → m/microsoft/dotnet/sdk/3-1.png
     """
     parts = package_id.lower().replace("_", "-").split(".")
     publisher = parts[0]
-    app_parts = parts[1:]
     first_letter = publisher[0]
-    return Path(first_letter) / publisher / Path(*app_parts).with_suffix(suffix)
+    return Path(first_letter) / publisher / Path(*parts[1:]).with_suffix(suffix)
 
 
-def make_search_terms(package_id: str) -> list[str]:
-    """Generate SVGRepo search-term candidates from a winget package ID.
-
-    Returns a prioritised list of terms to try (most-specific first).
+def slug_candidates(package_id: str) -> list[str]:
+    """Return an ordered list of lowercase slug candidates for icon lookups.
 
     Examples::
-
-        "Google.Chrome"            → ["chrome", "google chrome"]
-        "Google.AndroidStudio"     → ["android studio", "androidstudio", "google androidstudio"]
-        "Microsoft.DotNet.SDK.9"   → ["dotnet", "dotnet sdk", "microsoft dotnet"]
-        "Microsoft.OpenJDK.17"     → ["openjdk", "open jdk", "microsoft openjdk"]
+        "Google.Chrome"          → ["chrome", "google-chrome", "googlechrome"]
+        "Google.AndroidStudio"   → ["androidstudio", "android-studio", "google-androidstudio"]
+        "Microsoft.DotNet.SDK.9" → ["dotnetcore", "dotnet", "dotnet-sdk", "microsoft-dotnet"]
     """
     parts = package_id.split(".", 1)
     publisher = parts[0].lower()
     app = parts[1] if len(parts) > 1 else ""
     segments = app.split(".")
 
-    def split_camel(s: str) -> list[str]:
+    def camel_words(s: str) -> list[str]:
         return CAMEL_RE.sub(" ", s).lower().split()
 
-    first_words = split_camel(segments[0])
-    first_slug = segments[0].lower()
+    first_seg = segments[0]
+    first_words = camel_words(first_seg)
+    first_slug = first_seg.lower()
+    first_hyphen = "-".join(first_words)
 
-    candidates: list[str] = []
+    seen: list[str] = []
 
-    # "android studio", "chrome", "dotnet", "openjdk" …
-    candidates.append(" ".join(first_words))
-    if first_slug not in candidates:
-        candidates.append(first_slug)
+    def add(*slugs: str) -> None:
+        for s in slugs:
+            s = s.strip("-")
+            if s and s not in seen:
+                seen.append(s)
 
-    # First two segments joined: "dotnet sdk", "android studio beta" …
+    # bare app name variants
+    add(first_slug, first_hyphen)
+
+    # dotnet is usually called dotnetcore in devicons
+    if first_slug == "dotnet":
+        add("dotnetcore")
+
+    # two-segment join: "dotnet-sdk", "android-studio"
     if len(segments) >= 2:
-        two = split_camel(segments[0]) + split_camel(segments[1])
-        if (joined := " ".join(two)) not in candidates:
-            candidates.append(joined)
+        two = first_words + camel_words(segments[1])
+        add("-".join(two), "".join(two))
 
-    # Publisher + first segment: "google chrome", "microsoft dotnet" …
-    combined = f"{publisher} {first_slug}"
-    if combined not in candidates:
-        candidates.append(combined)
+    # publisher-prefixed: "google-chrome", "microsoft-dotnet"
+    add(f"{publisher}-{first_slug}", f"{publisher}-{first_hyphen}")
+    add(f"{publisher}{first_slug}")
 
-    # All segments flattened: last resort
-    all_words: list[str] = []
-    for seg in segments:
-        all_words.extend(split_camel(seg))
-    if len(all_words) > 1 and (full := " ".join(all_words)) not in candidates:
-        candidates.append(full)
-
-    return candidates
+    return seen
 
 
-def search_svgrepo(term: str) -> str | None:
-    """Search SVGRepo for a multicolor SVG and return the SVG URL of the first result.
+def find_colored_svg(package_id: str, devicons: set[str]) -> tuple[str, bytes] | None:
+    """Try each icon source in priority order.  Returns (source_label, svg_bytes) or None."""
+    for slug in slug_candidates(package_id):
+        # 1. Devicons (colored originals)
+        if slug in devicons:
+            url = DEVICONS_URL.format(slug=slug)
+            data = fetch(url)
+            if data and b"<svg" in data:
+                return (f"devicons:{slug}", data)
 
-    Returns ``None`` when no multicolor result is found or the site is unreachable.
-    """
-    safe_term = term.replace(" ", "-")
-    url = SVGREPO_SEARCH.format(term=safe_term)
-    r = fetch(url, timeout=20)
-    if r is None:
-        return None
+        # 2. Papirus desktop icons
+        url = PAPIRUS_URL.format(slug=slug)
+        data = fetch(url)
+        if data and b"<svg" in data:
+            return (f"papirus:{slug}", data)
 
-    matches = SVGREPO_SVG_URL_RE.findall(r.text)
-    if matches:
-        icon_id, slug = matches[0]
-        return f"https://www.svgrepo.com/show/{icon_id}/{slug}.svg"
+        # 3. Ionicons brand logos
+        url = IONICONS_URL.format(slug=slug)
+        data = fetch(url)
+        if data and b"<svg" in data:
+            return (f"ionicons:logo-{slug}", data)
 
     return None
 
@@ -143,7 +160,7 @@ def save_svg(svg_bytes: bytes, out_path: Path) -> None:
 
 
 def svg_to_png(svg_bytes: bytes, out_path: Path) -> bool:
-    """Convert *svg_bytes* to a 1024×1024 PNG at *out_path*.  Returns True on success."""
+    """Render *svg_bytes* to a 1024×1024 PNG.  Returns True on success."""
     try:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         cairosvg.svg2png(
@@ -154,24 +171,37 @@ def svg_to_png(svg_bytes: bytes, out_path: Path) -> bool:
         )
         return True
     except Exception as e:
-        print(f"    SVG→PNG conversion failed: {e}")
+        print(f"    SVG→PNG failed: {e}")
         return False
 
 
 def read_wishlist() -> list[str]:
-    """Return all non-empty package IDs from wishlist.txt."""
     if not WISHLIST.exists():
         return []
-    return [line.strip() for line in WISHLIST.read_text().splitlines() if line.strip()]
+    return [l.strip() for l in WISHLIST.read_text().splitlines() if l.strip()]
 
 
 def write_wishlist(packages: list[str]) -> None:
-    """Overwrite wishlist.txt with the given list (one package per line)."""
-    if packages:
-        WISHLIST.write_text("\n".join(packages) + "\n")
-    else:
-        WISHLIST.write_text("")
+    WISHLIST.write_text(("\n".join(packages) + "\n") if packages else "")
 
+
+def git_commit(message: str) -> None:
+    """Stage all changes and create a commit."""
+    subprocess.run(["git", "-C", str(REPO_ROOT), "add", "-A"], check=True)
+    result = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "diff", "--cached", "--quiet"]
+    )
+    if result.returncode == 0:
+        print("  (nothing to commit)")
+        return
+    subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "commit", "-m", message],
+        check=True,
+    )
+    print(f"  Committed: {message}")
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
     packages = read_wishlist()
@@ -179,14 +209,17 @@ def main() -> None:
         print("wishlist.txt is empty – nothing to do.")
         return
 
-    print(f"Wishlist has {len(packages)} packages. Will stop after {STOP_AFTER} icons found.")
+    print(f"Loading devicons catalog…")
+    devicons = load_devicons_catalog()
+    print(f"  {len(devicons)} colored devicons available.")
+    print(f"Wishlist: {len(packages)} packages. Will stop after {STOP_AFTER} icons found.\n")
 
-    success = 0
+    found: list[str] = []  # package IDs successfully saved this run
     failed = 0
 
-    while packages and success < STOP_AFTER:
+    while packages and len(found) < STOP_AFTER:
         pid = packages.pop(0)
-        write_wishlist(packages)  # persist immediately so a crash leaves a clean state
+        write_wishlist(packages)  # persist immediately (crash-safe)
 
         png_path = REPO_ROOT / package_path(pid, ".png")
         svg_path = REPO_ROOT / package_path(pid, ".svg")
@@ -195,43 +228,36 @@ def main() -> None:
             print(f"SKIP (exists): {pid}")
             continue
 
-        print(f"[found={success}] {pid}")
-        search_terms = make_search_terms(pid)
+        print(f"[{len(found)}/{STOP_AFTER}] {pid}")
+        result = find_colored_svg(pid, devicons)
 
-        svg_url = None
-        for term in search_terms:
-            svg_url = search_svgrepo(term)
-            if svg_url:
-                print(f"    Found via '{term}': {svg_url}")
-                break
-            time.sleep(0.3)
-
-        if not svg_url:
-            print("    No SVGRepo result")
+        if not result:
+            print("    ✗ no colored icon found")
             failed += 1
             continue
 
-        resp = fetch(svg_url, timeout=30)
-        if not resp or not resp.content:
-            print("    Failed to download SVG")
-            failed += 1
-            continue
-
-        svg_bytes = resp.content
-
+        source, svg_bytes = result
         save_svg(svg_bytes, svg_path)
-        print(f"    Saved SVG: {package_path(pid, '.svg')}")
-
         if svg_to_png(svg_bytes, png_path):
-            print(f"    Saved PNG: {package_path(pid, '.png')}")
-            success += 1
+            print(f"    ✓ {source}  →  {package_path(pid, '.svg')}")
+            found.append(pid)
         else:
             failed += 1
 
-        time.sleep(0.5)
-
     remaining = len(read_wishlist())
-    print(f"\nDone. Icons found: {success}, Failed/skipped: {failed}, Remaining in wishlist: {remaining}")
+
+    if found:
+        ids = ", ".join(found)
+        commit_msg = f"Add {len(found)} colored icons ({ids})"
+        print(f"\nCommitting {len(found)} icon(s)…")
+        git_commit(commit_msg)
+    else:
+        print("\nNo new icons found – nothing to commit.")
+
+    print(
+        f"\nDone. Found: {len(found)}, Failed/no-match: {failed}, "
+        f"Remaining in wishlist: {remaining}"
+    )
 
 
 if __name__ == "__main__":
