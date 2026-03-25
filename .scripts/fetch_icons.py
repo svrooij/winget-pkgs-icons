@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-"""Download icons for Google.* and Microsoft.* winget packages from SVGRepo."""
+"""Download icons for winget packages listed in wishlist.txt from SVGRepo.
 
-import csv
-import io
+The script reads package IDs one at a time from wishlist.txt (root of the
+repo), removes each entry as it is processed, and stops after finding
+STOP_AFTER icons or when the file becomes empty.
+"""
+
 import re
 import time
 from pathlib import Path
@@ -11,11 +14,9 @@ import cairosvg
 import requests
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-CSV_URL = "https://github.com/svrooij/winget-pkgs-index/raw/main/index.csv"
+WISHLIST = REPO_ROOT / "wishlist.txt"
 SVGREPO_SEARCH = "https://www.svgrepo.com/vectors/{term}/multicolor/"
-
-# Locale suffix pattern, e.g. .de-DE, .fr-FR, .zh-Hans
-LOCALE_RE = re.compile(r"\.[a-z]{2}(-[A-Za-z]{2,4})?$")
+STOP_AFTER = 10  # commit-friendly batch size
 
 # Matches CamelCase word boundaries, e.g. "AndroidStudio" → "Android Studio"
 CAMEL_RE = re.compile(r"(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
@@ -157,52 +158,44 @@ def svg_to_png(svg_bytes: bytes, out_path: Path) -> bool:
         return False
 
 
+def read_wishlist() -> list[str]:
+    """Return all non-empty package IDs from wishlist.txt."""
+    if not WISHLIST.exists():
+        return []
+    return [line.strip() for line in WISHLIST.read_text().splitlines() if line.strip()]
+
+
+def write_wishlist(packages: list[str]) -> None:
+    """Overwrite wishlist.txt with the given list (one package per line)."""
+    if packages:
+        WISHLIST.write_text("\n".join(packages) + "\n")
+    else:
+        WISHLIST.write_text("")
+
+
 def main() -> None:
-    print("Downloading package index CSV…")
-    r = SESSION.get(CSV_URL, timeout=60)
-    r.raise_for_status()
+    packages = read_wishlist()
+    if not packages:
+        print("wishlist.txt is empty – nothing to do.")
+        return
 
-    text = r.text.lstrip("\ufeff")
-    reader = csv.DictReader(io.StringIO(text))
-    rows = [
-        {k.strip('"').strip("\ufeff"): v for k, v in row.items()}
-        for row in reader
-    ]
-    print(f"Total packages in CSV: {len(rows)}")
-
-    filtered = [
-        row for row in rows
-        if (
-            row["PackageId"].startswith("Google.")
-            or row["PackageId"].startswith("Microsoft.")
-        )
-        and not LOCALE_RE.search(row["PackageId"])
-    ]
-
-    latest: dict[str, dict] = {}
-    for row in filtered:
-        pid = row["PackageId"]
-        if pid not in latest or row.get("Version", "") >= latest[pid].get("Version", ""):
-            latest[pid] = row
-
-    packages = list(latest.values())
-    print(f"Unique Google/Microsoft packages: {len(packages)}")
+    print(f"Wishlist has {len(packages)} packages. Will stop after {STOP_AFTER} icons found.")
 
     success = 0
-    skipped = 0
     failed = 0
 
-    for i, row in enumerate(packages, 1):
-        pid = row["PackageId"]
+    while packages and success < STOP_AFTER:
+        pid = packages.pop(0)
+        write_wishlist(packages)  # persist immediately so a crash leaves a clean state
+
         png_path = REPO_ROOT / package_path(pid, ".png")
         svg_path = REPO_ROOT / package_path(pid, ".svg")
 
         if png_path.exists() and svg_path.exists():
-            print(f"[{i}/{len(packages)}] SKIP (exists): {package_path(pid)}")
-            skipped += 1
+            print(f"SKIP (exists): {pid}")
             continue
 
-        print(f"[{i}/{len(packages)}] {pid}")
+        print(f"[found={success}] {pid}")
         search_terms = make_search_terms(pid)
 
         svg_url = None
@@ -237,7 +230,8 @@ def main() -> None:
 
         time.sleep(0.5)
 
-    print(f"\nDone. Success: {success}, Skipped: {skipped}, Failed: {failed}")
+    remaining = len(read_wishlist())
+    print(f"\nDone. Icons found: {success}, Failed/skipped: {failed}, Remaining in wishlist: {remaining}")
 
 
 if __name__ == "__main__":
