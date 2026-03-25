@@ -51,4 +51,4 @@ jobs:
       - name: Validate images
         if: steps.changed-files.outputs.any_changed == 'true'
         run: |
-          python3 scripts/validate_images.py ${{ steps.changed-files.outputs.files }}
+          python3 .scripts/validate_images.py ${{ steps.changed-files.outputs.files }}
